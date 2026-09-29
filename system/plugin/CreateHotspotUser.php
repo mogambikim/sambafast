@@ -41,6 +41,87 @@ function Alloworigins()
     }
 }
 
+/**
+ * Signing key for hotspot account tokens.
+ *
+ * The captive portal page is served by the router and calls this endpoint
+ * cross-origin, with CORS opened to '*', so a cookie set by this server could
+ * never be sent back on that fetch. A signed value handed to the page and
+ * returned in the request body has no such problem, because no browser blocks
+ * a body parameter.
+ *
+ * The key is generated once and kept in tbl_appconfig so issued tokens keep
+ * verifying across requests and restarts.
+ */
+function hotspotAccountSecret()
+{
+    $rows = ORM::for_table('tbl_appconfig')
+        ->where('setting', 'hotspot_account_secret')
+        ->find_many();
+
+    $existing = [];
+    foreach ($rows as $row) {
+        if (!empty($row->value)) {
+            $existing[] = $row->value;
+        }
+    }
+
+    if (!empty($existing)) {
+        // min() rather than the first row: if the key is ever written twice by
+        // two simultaneous first requests, every request still agrees on one
+        // value, so tokens issued a moment earlier keep verifying.
+        return min($existing);
+    }
+
+    $secret = bin2hex(random_bytes(32));
+
+    $row = ORM::for_table('tbl_appconfig')->create();
+    $row->setting = 'hotspot_account_secret';
+    $row->value = $secret;
+    $row->save();
+
+    return $secret;
+}
+
+/**
+ * Sign an account number so the browser can later prove it was issued it.
+ */
+function hotspotAccountToken($accountNumber)
+{
+    return $accountNumber . '.' . hash_hmac('sha256', (string) $accountNumber, hotspotAccountSecret());
+}
+
+/**
+ * The customer a token vouches for, or null when the token is missing,
+ * malformed, or not signed with this installation's key.
+ *
+ * This is what makes reusing an account safe. The browser can invent any
+ * account number it likes, but it cannot invent the matching signature for one
+ * it was never handed. Anything unsigned is ignored.
+ */
+function hotspotAccountFromToken($token)
+{
+    if (!is_string($token) || $token === '' || strpos($token, '.') === false) {
+        return null;
+    }
+
+    $parts = explode('.', $token, 2);
+    $accountNumber = trim($parts[0]);
+    $signature = trim($parts[1]);
+
+    if ($accountNumber === '' || $signature === '') {
+        return null;
+    }
+
+    $expected = hash_hmac('sha256', $accountNumber, hotspotAccountSecret());
+
+    if (!hash_equals($expected, $signature)) {
+        return null;
+    }
+
+    return ORM::for_table('tbl_customers')->where('username', $accountNumber)->find_one();
+}
+
 function ReconnectVoucher() {
     header('Content-Type: application/json');
 
@@ -58,6 +139,7 @@ function ReconnectVoucher() {
 
     $accountId = $postData['account_id'];
     $voucherCode = $postData['voucher_code'];
+    $accountToken = isset($postData['account_token']) ? $postData['account_token'] : '';
 
     // First check if this account ID has any active sessions
     $activeUser = ORM::for_table('tbl_user_recharges')
@@ -71,13 +153,18 @@ function ReconnectVoucher() {
             ->where('code', $voucherCode)
             ->find_one();
             
-        if ($voucher && $voucher['user'] == $accountId) {
+        // The voucher's user column holds a customer id, so compare it with the
+        // id that owns this active session. Comparing it against the account
+        // number string could never match, so a customer re-entering the voucher
+        // they were already using was told the code was invalid instead.
+        if ($voucher && (int) $voucher['user'] === (int) $activeUser['customer_id']) {
             echo json_encode([
                 'status' => 'success',
                 'Resultcode' => '2',
                 'voucher' => 'active',
                 'message' => 'Your session is still active',
-                'username' => $accountId
+                'username' => $accountId,
+                'account_token' => hotspotAccountToken($accountId)
             ]);
             exit();
         }
@@ -133,12 +220,16 @@ function ReconnectVoucher() {
         exit();
     }
 
-    $user = ORM::for_table('tbl_customers')->where('username', $accountId)->find_one();
-    if ($user && (int) $voucher['user'] !== (int) $user['id']) {
-        // An unused voucher must not attach to an existing customer just
-        // because the browser supplied a colliding account number.
-        $user = null;
-    }
+    // Reuse the account this browser can prove it was issued, so a customer who
+    // redeems voucher after voucher keeps one account number instead of getting
+    // a fresh one every time. Only a signed token is trusted here. The account
+    // number in the request body is invented by the browser, and reusing on that
+    // alone is exactly what 2.2.11 had to stop: a colliding number pulled a
+    // second person's voucher onto an existing customer. A token the browser was
+    // actually given carries a signature only this installation can produce, so
+    // it cannot be forged for an account the browser was never issued.
+    $user = hotspotAccountFromToken($accountToken);
+
     if (!$user) {
         // Create a new user if not exists
         $accountId = generateUniqueHotspotAccountId();
@@ -168,6 +259,7 @@ function ReconnectVoucher() {
             'voucher' => 'activated',
             'message' => 'Voucher code has been activated',
             'username' => $user->username,
+            'account_token' => hotspotAccountToken($user->username),
             'persistId' => true // Flag to indicate the frontend should persist this ID
         ]);
     } else {
@@ -368,7 +460,7 @@ function CreateHostspotUser()
                 $Userexist->router_id = $routerId;
                 $Userexist->save();
                 InitiateStkpush($phone, $planId, $accountId, $routerId);
-                echo json_encode(['status' => 'success', 'message' => 'Payment request sent.', 'account_id' => $accountId]);
+                echo json_encode(['status' => 'success', 'message' => 'Payment request sent.', 'account_id' => $accountId, 'account_token' => hotspotAccountToken($accountId)]);
             } else {
                 try {
                     // Never trust a browser-generated ID for a new customer.
@@ -389,7 +481,7 @@ function CreateHostspotUser()
                     $createUser->service_type = 'Hotspot';
                     if ($createUser->save()) {
                         InitiateStkpush($phone, $planId, $accountId, $routerId);
-                        echo json_encode(['status' => 'success', 'message' => 'Payment request sent.', 'account_id' => $accountId]);
+                        echo json_encode(['status' => 'success', 'message' => 'Payment request sent.', 'account_id' => $accountId, 'account_token' => hotspotAccountToken($accountId)]);
                     } else {
                         echo json_encode(["status" => "error", "message" => "There was a system error when registering user, please contact support."]);
                     }

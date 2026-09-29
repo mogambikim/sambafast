@@ -58,6 +58,25 @@ document.addEventListener('DOMContentLoaded', function() {
 <script id="md-source" type="text/markdown">
  # CHANGELOG
 
+## [2.2.36] - 2026-09-29
+
+---
+
+### FIXED: Account Number Changing on Every Voucher Redemption
+
+**`system/plugin/CreateHotspotUser.php`**, **`system/plugin/download.php`**
+
+- Redeeming a voucher gave the customer a **different account number every time**, and created a separate `tbl_customers` row for each redemption, so one person's purchases were scattered across unrelated accounts with no shared history or expiry.
+- Two faults combined. First, the reuse check in `ReconnectVoucher()` could never pass: the voucher is loaded with `status = '0'` (unused), so `$voucher['user']` is always `'0'`, and `0 !== <customer id>` is always true. The existing customer was therefore discarded on every redemption, and the reuse branch was unreachable dead code. Second, the page never stored the number the server assigned. The M-Pesa handlers persist it, the voucher handler did not, so the browser kept sending the number it invented at page load and the server could never match it.
+- The guard that discarded the customer was not arbitrary. It came from **2.2.11**, which fixed a real bug where a browser-invented 5-digit number collided with another customer and attached a second person's payment or voucher to that existing customer. Its rule was "reuse only when the same phone owns the account and the account already has five digits". A voucher redemption sends no phone, so it could never satisfy that rule and always fell through to creating a new account.
+- So the voucher path now gets an ownership signal that cannot be faked, without reopening 2.2.11. On success the server issues a **signed token** (`account number` + `.` + `HMAC-SHA256(account number, key)`); the page stores it and returns it with the next redemption. A token that verifies proves the browser really was issued that account, so the account is reused. A missing, unsigned or tampered token is ignored and a new account is created, exactly as before, so a colliding number still cannot reach somebody else's account.
+- The signing key is generated once on first use and kept in `tbl_appconfig` as `hotspot_account_secret`, so issued tokens keep verifying across requests and restarts. If the key is ever written twice by two simultaneous first requests, the lowest value is used so all requests agree on one key.
+- The token travels in the request body rather than as a cookie on purpose: the portal page is served by the router and calls this endpoint cross-origin with CORS opened to `*`, so a cookie set by this server could never be sent back on that request.
+- The M-Pesa purchase responses now carry the same token, so a customer who pays by M-Pesa and then redeems a voucher keeps one account. That path's own reuse rule (phone match) is untouched.
+- Also fixed in the same handler: the "your session is still active" check compared the voucher's `user` column, which holds a **customer id**, against the **account number string**, so it could never match and a customer re-entering the voucher they were already using was told "Invalid Voucher code". It now compares against the customer id that owns the active session.
+- Also fixed a dead cookie read: the page loaded the account number from `getCookie('accountid')` while every writer uses `'accountId'`. Cookie names are case-sensitive, so that lookup never succeeded. It is now spelled consistently, and the assigned number is stored for 365 days.
+- Expect one last change on the first redemption after this version: the browser has no token yet, so a new account is issued and remembered. Every redemption after that keeps the same account number.
+
 ## [2.2.35] - 2026-09-24
 
 ---
