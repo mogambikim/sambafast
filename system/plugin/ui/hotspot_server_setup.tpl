@@ -248,13 +248,14 @@
                                 </div>
 
                                 <!-- IP Address -->
-                                <div class="form-group" style="margin-bottom:18px;">
-                                    <label>IP Address / Prefix</label>
-                                    <input type="text" name="ip_address" class="form-control-modern"
-                                           value="10.0.0.1/22"
-                                           pattern="\d{1,3}(\.\d{1,3}){3}\/\d{1,2}" required>
-                                    <div class="hint-text">Gateway IP on the bridge. DHCP pool is derived automatically. Example: 10.0.0.1/22</div>
-                                </div>
+                               <!-- IP Address -->
+<div class="form-group" style="margin-bottom:18px;">
+    <label>IP Address / Prefix</label>
+    <input type="text" name="ip_address" class="form-control-modern"
+           value="10.0.0.1/22"
+           pattern="[0-9]+(\.[0-9]+)(\.[0-9]+)(\.[0-9]+)/[0-9]+" required>
+    <div class="hint-text">Gateway IP on the bridge. DHCP pool is derived automatically. Example: 10.0.0.1/22</div>
+</div>
 
                                 <!-- DNS -->
                                 <div class="form-group" style="margin-bottom:24px;">
